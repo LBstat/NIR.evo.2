@@ -341,7 +341,7 @@ p_region <- ggplot(L, aes(x = featset, y = value, fill = grp)) +
   theme_minimal(base_size = 11) +
   theme(panel.grid.minor = element_blank(), legend.position = "top")
 
-ggsave("plot/region performance.png", p_region, width = 12, height = 6, dpi = 300)
+ggsave("plot/region_performance.png", p_region, width = 12, height = 6, dpi = 300)
 p_region
 ```
 
@@ -382,7 +382,7 @@ p_strip <- ggplot(D, aes(x = learner, y = value)) +
   theme_minimal(base_size = 11) +
   theme(panel.grid.minor = element_blank())
 
-ggsave("plot/seed stability.png", p_strip, width = 12, height = 6, dpi = 300)
+ggsave("plot/seed_stability.png", p_strip, width = 12, height = 6, dpi = 300)
 p_strip
 ```
 
