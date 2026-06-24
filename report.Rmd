@@ -1,0 +1,548 @@
+---
+title: "Non-Destructive Freshness Assessment in Fish Fillets via NIR Spectroscopy: Multivariate Optimization and K-value Classification Strategies"
+author: "Luca Bernardi"
+date: "2026-06-24"
+---
+
+```{r Setup, include = FALSE}
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 12,
+  fig.height = 6,
+  echo = FALSE
+)
+
+# Globals
+POS_LABEL <- "very good/good" 
+NEG_LABEL <- "impending spoilage/spoiled"
+CLASS_LEVELS <- c(POS_LABEL, NEG_LABEL)
+KV_THRESHOLD <- 0.40
+
+LEARNERS <- c("NB","LDA","QDA","KNN","SVM","RF","XGB") # don't change
+CO_FEATURES <- c("C=O lipids_mean", "C=O lipids_slope", "C=O lipids_sd") # don't change
+
+grp_pal <- c(fatty = "#9B1B30", `non-fatty` = "#5B8CA8", all = "#888888")
+
+learner_pal <- c(
+  RF  = "#B2182B",
+  XGB = "#E8806A",
+  SVM = "#762A83",
+  KNN = "#9970AB",
+  NB  = "#7FA8C9",
+  LDA = "#2166AC",
+  QDA = "#4393C3"
+)
+
+NSEED <- 10
+BOOTSTRAP <- 1000
+```
+
+## **Introduction**
+
+### Study Objectives
+
+This report is the coherent evolution of the first project on Near-Infrared (NIR) spectroscopy. The previous analysis suffered from high dimensionality: with a small sample size and 140 spectral wavelengths, the data were sparse, an unfavourable setting for any classification algorithm.Building on those investigations, the present study pursues a single objective: to reduce the dimensionality of the NIR spectra through a chemically interpretable strategy, and to assess whether the previous results hold or whether classification improves.
+
+As a brief recall, the K-value reflects the progressive degradation of adenosine triphosphate (ATP) driven by post-mortem muscle biochemistry, and is a recognised standard for freshness assessment in fish.
+
+$$
+K(\%) = \frac{[Inosine] + [Hypoxanthine]}{[ATP] + [ADP] + [AMP] + [IMP] + [Inosine] + [Hypoxanthine]} \times 100
+$$
+
+### Study Design and Dataset
+
+Data were collected between May and June 2025 on 49 gilthead seabream (Sparus aurata) fillets stored under controlled conditions for up to 10 days. NIR spectra were acquired at five distinct positions per fillet to account for spatial variability and subsequently averaged. The dataset includes the following variables:
+
+| Variable | Description |
+|---|---|
+| Sample | Fillet identifier |
+| Day | Storage day (1–10) |
+| L* | CIE lightness |
+| a* | Redness index |
+| b* | Yellowness index |
+| C* | Chroma (derived from a* and b*) |
+| h | Hue angle |
+| mg N/100g | Volatile basic nitrogen concentration |
+| K-value | Biochemical freshness index |
+| NIR wavelengths | Spectral absorbance at 140 wavelengths (1350–2556 nm) |
+| IMP, ATP, ADP, AMP, Inosine, Hypoxanthine | Chemical components for K-value computation (partially missing) |
+
+## **Data Analysis**
+
+### 1.1 Data Preparation and Pre-Processing
+
+```{r Data Import}
+source("settings.R")
+source("source_all.R")
+
+if (!file.exists("data/intermediate/data analysis.rds")) {
+  build_data_main()
+}
+
+data_original <- readRDS("data/intermediate/data analysis.rds")
+
+kableExtra::kable(na.omit(data_original), "html", caption = "Table 1: Original dataset") |>
+  kableExtra::kable_styling(full_width = FALSE, font_size = 10) |>
+  kableExtra::scroll_box(width = "100%", height = "400px")
+```
+
+Raw NIR spectra, acquired at five positions per fillet, were averaged to obtain a single representative spectrum per sample. Spectra were subsequently pre-processed in two sequential steps. First, a Savitzky-Golay filter (window = 11, polynomial degree = 2, no derivative) was applied to reduce high-frequency noise while preserving spectral shape. Second, Standard Normal Variate (SNV) normalisation was applied per sample to remove multiplicative scatter effects and baseline shifts. Pre-processing was performed at the sample level to preserve inter-sample independence.
+NIR wavelengths were grouped into spectral regions corresponding to distinct chemical compounds (water/C-H, protein N-H, C=O lipids, water/amide, and C-H/C-O esters). Each region was summarised by three variables: the mean, the slope, and the standard deviation, capturing respectively the average absorbance level of the interval, the local trend of the spectrum across it, and its internal variability. This reduced the 140 original wavelengths to 15 interpretable features (three per region), substantially easing the dimensionality problem while retaining a chemically meaningful description of each spectral window.
+
+### 1.2 Missing Data
+
+In this second study the analysis was restricted to the complete-case dataset; no imputation was performed (n = 30). This differs from the first project, where missing HPLC components had been imputed to retain all 49 fillets. Working only on complete cases removes the additional variability introduced by imputation and ensures that both the spectra and the K-value labels derive from the same, fully measured samples, at the cost of a smaller sample size.
+
+```{r Data Pre-processing}
+nir_vars   <- grep("^[[:digit:]]+$", colnames(data_original), value = TRUE)
+
+chem_vars <- c("IMP", "ATP", "ADP", "Hypoxanthine", "AMP", "Inosine")
+complete_idx <- complete.cases(data_original[, ..chem_vars])
+
+data_spectra_full <- preprocess_nir(na.omit(data_original[, ..nir_vars]))
+data_spectra_real <- data_spectra_full[complete_idx]
+
+X_real <- as.matrix(data_spectra_real)
+storage.mode(X_real) <- "numeric"
+
+kv_real  <- data_original[complete_idx]$Kvalue
+day_real <- data_original[complete_idx]$day
+
+cls_real <- factor(ifelse(kv_real <= KV_THRESHOLD, POS_LABEL, NEG_LABEL), levels = CLASS_LEVELS)
+
+nir_regions <- data.frame(
+  region = c(
+    "water/C-H",
+    "protein N-H",
+    "C=O lipids",
+    "water/amide",
+    "C-H/C-O esters"
+  ),
+  lo = c(1350, 1500, 1630, 1900, 2130),
+  hi = c(1450, 1560, 1760, 2000, 2350),
+  note = c(
+    "O-H/C-H first overtone; water-dominated",
+    "N-H overtone; protein structure (LMM signal sat here)",
+    "C-H 1st OT / C=O; lipid oxidation (rancidity)",
+    "O-H combination + amide; water & C=O/N-H (NGCI 1900-2000 region)",
+    "C-H/N-H/O-H combination; proteins, lipids, esters"
+  ),
+  stringsAsFactors = FALSE
+)
+
+region_of <- assign_nir_region(as.numeric(colnames(X_real)))
+regions <- setdiff(unique(region_of), "other")
+
+kableExtra::kable(table(region_of), "html", caption = "Table 2: Bands per region") |>
+  kableExtra::kable_styling(full_width = FALSE, font_size = 10) |>
+  kableExtra::scroll_box(width = "100%", height = "400px")
+
+Xr_real <- regional_features(X_real, regions)
+```
+
+## **Classification Models**
+
+Let $\{(x_i, y_i)\}_{i=1}^n$ be a training dataset, where $x_i \in \mathbb{R}^p$ denotes the vector of NIR wavelengths and $y_i \in \{0, 1\}$ the corresponding freshness label.
+
+### 2.1 Naïve Bayes (NB)
+
+Naïve Bayes applies Bayes' theorem under the assumption of conditional independence between predictors given the class label:
+
+$$\hat{y}(x) = \arg\max_{c} \; \log \pi_c + \sum_{j=1}^p \log p(x_j \mid y = c)$$
+
+where $\pi_c$ is the prior probability of class $c$ and $p(x_j \mid y = c)$ is the class-conditional density of the $j$-th predictor, estimated via Gaussian kernel smoothing. Despite the strong independence assumption — rarely satisfied in NIR data due to high inter-wavelength correlation — Naïve Bayes often performs competitively in practice, particularly in small-sample settings.
+
+### 2.2 Linear Discriminant Analysis (LDA)
+
+LDA assumes multivariate normality within each class with a shared covariance matrix $\Sigma$:
+
+$$x \mid y = c \sim \mathcal{N}(\mu_c, \Sigma)$$
+
+Classification is based on the linear discriminant score:
+
+$$\delta_c(x) = x^\top \Sigma^{-1} \mu_c - \frac{1}{2} \mu_c^\top \Sigma^{-1} \mu_c + \log \pi_c$$
+
+When $p > n$, $\Sigma$ is singular and LDA is computed via singular value decomposition (SVD), projecting data onto the subspace of maximum class separation. LDA produces linear decision boundaries and is statistically efficient under its assumptions, making it a suitable baseline in small-sample, high-dimensional settings.
+
+### 2.3 Quadratic Discriminant Analysis (QDA)
+
+QDA relaxes the equal-covariance assumption of LDA, allowing class-specific covariance matrices $\Sigma_c$:
+
+$$\delta_c(x) = -\frac{1}{2} \log |\Sigma_c| - \frac{1}{2}(x - \mu_c)^\top \Sigma_c^{-1}(x - \mu_c) + \log \pi_c$$
+
+QDA produces quadratic decision boundaries and can capture heteroscedastic class structures, but requires sufficient within-class observations to estimate $\Sigma_c$ reliably. In high-dimensional settings with small samples, QDA is prone to rank deficiency and was therefore restricted to a maximum of two selected wavelengths.
+
+### 2.4 k-Nearest Neighbours (k-NN)
+
+Given a new observation $x$, the predicted class is determined by majority vote among the $k$ nearest training points $\mathcal{N}_k(x)$:
+
+$$\hat{y}(x) = \arg\max_{c} \sum_{i \in \mathcal{N}_k(x)} \mathbb{I}(y_i = c)$$
+
+k-NN is a non-parametric, instance-based classifier that makes no distributional assumptions. Its bias-variance trade-off is governed by $k$, which was tuned jointly with the number of retained wavelengths via inner cross-validation. The optimal kernel weighting function was also selected during tuning.
+
+### 2.5 Support Vector Machine (SVM)
+
+SVM estimates a separating hyperplane by solving the regularised optimisation problem:
+
+$$\min_{w,b,\xi} \; \frac{1}{2}\|w\|^2 + C\sum_{i=1}^n \xi_i \quad \text{subject to} \quad y_i(w^\top x_i + b) \geq 1 - \xi_i, \; \xi_i \geq 0$$
+
+where $C > 0$ controls the margin-error trade-off and was tuned via inner cross-validation. A linear kernel was used, appropriate for high-dimensional settings where $p \gg n$. Predictors were standardised prior to fitting to ensure comparable feature scales.
+
+### 2.6 Random Forest (RF)
+
+Random Forest builds an ensemble of $B$ decision trees, each trained on a bootstrap sample of the data with a random subset of $m$ predictors considered at each split:
+
+$$\hat{y}(x) = \arg\max_{c} \sum_{b=1}^B \mathbb{I}(\hat{y}_b(x) = c)$$
+
+RF is robust to overfitting through averaging, handles high-dimensional correlated predictors well, and provides variable importance measures via the mean decrease in node impurity. $B = 500$ trees were used in all experiments.
+
+### 2.7 XGBoost
+
+XGBoost fits an additive ensemble of $M$ regression trees by sequentially minimizing a regularized objective:
+
+$$\mathcal{L} = \sum_{i=1}^n \ell\!\left(y_i,\, \hat{y}_i^{(m-1)} + f_m(x_i)\right) + \Omega(f_m)$$
+
+where $\ell$ is the logistic loss for binary classification, $f_m$ is the $m$-th tree added at iteration $m$, and $\Omega(f_m)$ penalises tree complexity. The learning rate $\eta = 0.1$, maximum tree depth of 3, and subsampling-ratio of 0.8 were fixed across all experiments.
+
+### 2.8 Comparative Summary
+
+| Model | Decision boundary | Distributional assumptions | Notes |
+|:---|:---|:---|:---|
+| Naïve Bayes | — | Conditional independence | Robust with small $n$ |
+| LDA | Linear | Multivariate normal, equal $\Sigma$ | SVD-based for $p > n$ |
+| QDA | Quadratic | Multivariate normal, class-specific $\Sigma_c$ | Restricted to $\leq 2$ wavelengths |
+| k-NN | Non-parametric | None | $k$ and kernel tuned via CV |
+| SVM | Linear | None | $C$ tuned via CV, features scaled |
+| Random Forest | Non-parametric | None | 500 trees, impurity importance |
+| XGBoost | Non-parametric | None | $\eta = 0.1$, depth = 3 |
+
+```{r Classification}
+feat <- colnames(Xr_real)
+region_of_f <- sub("_(mean|slope|sd)$", "", feat)
+region_sets <- split(feat, region_of_f)
+
+if (!file.exists("data/results/overall regions results.rds")) {
+
+  # ---- run multi-seed for one feature matrix --------------------------------
+  run_seeds <- function(Xm, label, tuned = FALSE) {
+    rbindlist(lapply(seq_len(NSEED), function(i) {
+      set.seed(123 + i)
+      r <- eval_lodo(Xm, cls_real, day_real, learners, tuned = tuned)
+      r[, `:=`(seed = 123 + i, featset = label)]
+      r
+    }))
+  }
+
+  # ---- loop over regions (3 features each) + the full 15-feature set --------
+  res_list <- lapply(names(region_sets), function(rg) {
+    cols <- region_sets[[rg]]
+    run_seeds(Xr_real[, ..cols], rg)
+  })
+
+  res_region <- rbindlist(res_list)
+  res_list[[length(res_list) + 1]] <- run_seeds(Xr_real, "all regions")
+
+  saveRDS(res_region, "data/results/overall regions results.rds")
+} else {
+  res_region <- readRDS("data/results/overall regions results.rds")
+}
+
+Xr_co <- Xr_real[, ..CO_FEATURES]
+
+if (!file.exists("data/results/optimal regions results.rds")) {
+
+  # ---- run multi-seed for best feature matrix -------------------------------
+  res_optimal <- rbindlist(lapply(seq_len(NSEED), function(i) {
+  set.seed(123 + i)
+  r <- eval_lodo(Xr_co, cls_real, day_real, tuned = TRUE)
+  r[, seed := 123 + i]
+  r
+  }))
+
+  saveRDS(res_optimal, "data/results/optimal regions results.rds")
+} else {
+  res_optimal <- readRDS("data/results/optimal regions results.rds")
+}
+```
+
+## **Comparative Analysis and Model Performance**
+
+### 3.1 Classification Performance
+
+Each spectral region was evaluated independently, using its three descriptors (mean, slope, standard deviation), and a model trained on all five regions jointly ("all regions", 15 features). For every configuration all seven classifiers were trained under leave-one-day-out validation and repeated across `NSEEDS` random seeds; the values reported below are averaged over learners and seeds, so they summarise the overall signal available in each region rather than the performance of any single best model.
+The results reveal a clear and chemically coherent ordering (Table 3). The two fatty-acid regions rank highest - C=O lipids (mean AUC 0.615, balanced accuracy 0.659) and C-H/C-O esters (AUC 0.581, BACC 0.573) — followed by the water/amide region (AUC 0.542). The protein N-H and water/C-H regions fall below chance (AUC 0.337 and 0.401, respectively), indicating that they carry essentially no discriminative information for freshness once the descriptors are averaged across models.
+
+Two observations deserve emphasis. First, the "all regions" model (AUC 0.601) does not outperform the single C=O lipid region (0.615): adding the remaining regions, several of which are uninformative, does not improve—and marginally dilutes—the signal already present in the fatty-acid window. This supports a parsimonious interpretation in which the discriminative information is concentrated in, rather than distributed across, the spectrum. Second, the standard deviations across seeds and learners are large relative to the differences between regions (sd_auc ≈ 0.07–0.10): the gap between the two fatty regions, and between C=O and "all regions", lies well within this variability and should not be over-interpreted. What is robust is the separation between the fatty-acid block (AUC ≈ 0.58–0.62) and the non-fatty regions (AUC ≈ 0.34–0.40), a difference that clearly exceeds the seed-to-seed noise.
+
+It is worth recalling that these figures are averaged over all seven classifiers, including linear models that perform near or below chance on this task. The averaging therefore understates the performance achievable with the better-suited models, and is intended to identify the signal-bearing region rather than to quantify maximal classification accuracy — the latter is addressed in the per-learner analysis (Section 3.2). The fact that several averages approach 0.5 is thus expected and not, in itself, a negative result: it reflects the inclusion of weak learners in the average, not the absence of signal.
+
+```{r Tables Results Overall}
+summ <- res_region[, .(
+  mean_auc = round(mean(auc, na.rm = TRUE), 3),
+  sd_auc = round(sd(auc, na.rm = TRUE), 3),
+  min_auc = round(min(auc, na.rm = TRUE), 3),
+  max_auc = round(max(auc, na.rm = TRUE), 3),
+  range_auc = round(max(auc, na.rm = TRUE) - min(auc, na.rm = TRUE), 3),
+  mean_bacc = round(mean(bacc, na.rm = TRUE), 3),
+  sd_bacc = round(sd(bacc, na.rm = TRUE), 3),
+  min_bacc = round(min(bacc, na.rm = TRUE), 3),
+  max_bacc = round(max(bacc, na.rm = TRUE), 3),
+  range_bacc = round(max(bacc, na.rm = TRUE) - min(bacc, na.rm = TRUE), 3),
+  n_valid = sum(!is.na(auc))
+), by = c("featset", "learner")][order(-mean_auc)]
+
+tab <- res_region[, .(
+  mean_auc = round(mean(auc, na.rm = TRUE), 3),
+  sd_auc = round(sd(auc, na.rm = TRUE), 3),
+  mean_bacc = round(mean(bacc, na.rm = TRUE), 3),
+  sd_bacc = round(sd(bacc, na.rm = TRUE), 3),
+  mean_sens = round(mean(sens, na.rm = TRUE), 3),
+  sd_sens = round(sd(sens, na.rm = TRUE), 3),
+  mean_spec = round(mean(spec, na.rm = TRUE), 3),
+  sd_spec = round(sd(spec, na.rm = TRUE), 3)
+), by = featset][order(-mean_auc)]
+
+kableExtra::kable(tab, "html", caption = "Table 3") |>
+  kableExtra::kable_styling(full_width = FALSE, font_size = 10) |>
+  kableExtra::scroll_box(width = "100%", height = "400px")
+
+L <- melt(
+  res_region,
+  id.vars = c("featset", "learner", "seed"),
+  measure.vars = c("auc", "bacc"),
+  variable.name = "metric",
+  value.name = "value"
+)
+
+L <- L[!is.na(value)]
+L[, metric := factor(metric, levels = c("auc", "bacc"), labels = c("AUC", "Balanced accuracy"))]
+
+reg_order <- res_region[, AUC := mean(auc, na.rm = TRUE), by = featset][order(AUC), featset]
+L[, featset := factor(featset, levels = unique(reg_order))]
+
+fatty <- c("C=O lipids", "C-H/C-O esters")
+neutral <- "all regions"
+L[, grp := fifelse(featset %in% fatty, "fatty", fifelse(featset == neutral, "all", "non-fatty"))]
+
+p_region <- ggplot(L, aes(x = featset, y = value, fill = grp)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey55") +
+  geom_boxplot(outlier.shape = NA, width = 0.6, alpha = 0.55, colour = "grey30") +
+  geom_jitter(width = 0.15, height = 0, size = 0.8, alpha = 0.4, colour = "grey20") +
+  coord_flip() +
+  facet_wrap(~ metric, scales = "free_x") +
+  scale_fill_manual(values = grp_pal, name = NULL) +
+  labs(
+    title = "Per-region performance across 10 seeds (all learners pooled)",
+    subtitle = "Box = 10 seeds x 7 learners; dashed = chance. Fatty regions (red) lead.",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid.minor = element_blank(), legend.position = "top")
+
+ggsave("plot/region performance.png", p_region, width = 12, height = 6, dpi = 300)
+p_region
+```
+
+### 3.2 Per-learner Performance and Seed Stability
+
+To complement the region-level averages, each classifier was examined individually on the full 15-feature set, again under leave-one-day-out validation across ten random seeds. Reporting both the confidence interval of the mean and the range spanned by individual runs allows performance and stability to be assessed jointly — a distinction that proves decisive here.
+By mean AUC, the two tree-based models lead: XGBoost (0.710) and Random Forest (0.706) are practically tied, with the remaining learners trailing (NB 0.613, SVM 0.599, KNN 0.546) and the linear LDA falling below chance (0.433). On mean performance alone, one might single out XGBoost as the best model.
+The stability column, however, reverses this reading. XGBoost is markedly variable across seeds (sd 0.030, single-run range 0.642–0.778), whereas Random Forest is far more stable (sd 0.013, range 0.678–0.734). The same contrast is even sharper on balanced accuracy, where Random Forest is in fact the top performer (0.705) and XGBoost drops to 0.656. Critically, XGBoost's apparent advantage on AUC is not mirrored on balanced accuracy — a discrepancy that signals the higher AUC values reflect favourable random splits rather than a genuine, consistent gain. SVM shows similarly wide variability (AUC range 0.471–0.726), while RF, KNN and LDA are the most reproducible.
+Taken together, these results identify Random Forest as the most reliable classifier: its performance is both competitive (AUC ≈ 0.71, balanced accuracy ≈ 0.71) and stable across resampling, whereas XGBoost achieves comparable peaks only intermittently. We therefore treat Random Forest as the reference model and report XGBoost as a high-variance comparator rather than as a headline result. More broadly, the agreement between two independent tree ensembles, and the failure of the linear models, reinforce that the freshness signal is genuine but non-linear — consistent with the regression results, where linear and non-linear models alike failed to predict the continuous K-value, but only non-linear classifiers recover the dichotomous distinction.
+
+```{r Plots Overall}
+D <- melt(
+  res_region[featset == "all regions"],
+  id.vars = c("learner", "seed"),
+  measure.vars = c("auc", "bacc"),
+  variable.name = "metric",
+  value.name = "value"
+)
+D <- D[!is.na(value)]
+D[, metric := factor(metric, levels = c("auc","bacc"), labels = c("AUC","Balanced accuracy"))]
+
+ord <- res_region[featset == "all regions" & !is.na(auc), median(auc), by = learner][order(V1), learner]
+D[, learner := factor(learner, levels = ord)]
+
+p_strip <- ggplot(D, aes(x = learner, y = value)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey55") +
+  geom_boxplot(width = 0.45, outlier.shape = NA, fill = "grey92", colour = "grey55") +
+  geom_jitter(aes(colour = learner), width = 0.12, height = 0, size = 2.2, alpha = 0.8, show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~ metric, scales = "free_x") +
+  scale_colour_manual(values = learner_pal) +
+  labs(
+    title = "Seed-to-seed stability of each model (15 regional features)",
+    subtitle = "Each dot = one of 10 seeds. Tight cluster = stable (RF); wide spread = luck-driven (XGB). Dashed = chance.",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid.minor = element_blank())
+
+ggsave("plot/seed stability.png", p_strip, width = 12, height = 6, dpi = 300)
+p_strip
+```
+
+### 3.3 Hyperparameter Tuning on the Optimal Region
+
+Having identified the C=O lipid region as the signal-bearing window, we asked whether tuning the classifiers' hyperparameters on that region would improve performance. All seven learners were tuned (random search, 25 evaluations, inner 3-fold cross-validation) within the same leave-one-day-out, multi-seed protocol, with the search space extended to include the SVM kernel parameters (cost, gamma) and the k of k-NN, so that every model was given a fair opportunity to be optimised.
+Tuning did not yield the expected improvement; in several cases it degraded performance. Comparing the tuned results (Table 4) with the untuned C=O figures of Section 3.1, Random Forest decreased slightly (AUC 0.645 → 0.637) and SVM dropped substantially (≈ 0.69 → 0.616), while the discriminant and probabilistic models were essentially unchanged. Only XGBoost showed a higher mean AUC (0.764), but with a very large standard deviation (0.099) — the widest of any model — and this gain did not translate to balanced accuracy in a stable way; as in Section 3.2, such a pattern indicates favourable random variation rather than a reproducible improvement.
+This outcome is expected at this sample size rather than anomalous. With 30 samples, the inner cross-validation used to select hyperparameters is itself noisy: the configuration that wins on the internal folds often does so by chance and generalises worse to the held-out day than sensible defaults. Tuning adds degrees of freedom that the data cannot constrain, so the selection procedure overfits. We therefore report default-hyperparameter models throughout: they are not merely a convenience but the empirically more robust and parsimonious choice, a conclusion supported directly by this comparison.
+One feature of the tuned results is nonetheless informative: across models, specificity consistently exceeds sensitivity (e.g. RF 0.842 vs 0.591; XGB 0.911 vs 0.636). The classifiers are better at correctly flagging spoiled fillets than at confirming fresh ones — they miss a fraction of fresh samples. For a screening application this error profile is arguably the safer one, since it errs towards caution, but it also marks a practical limitation of the current models.
+
+```{r Tables Results Optimal}
+tab <- res_optimal[, .(
+  mean_auc = round(mean(auc, na.rm = TRUE), 3),
+  sd_auc = round(sd(auc, na.rm = TRUE), 3),
+  mean_bacc = round(mean(bacc, na.rm = TRUE), 3),
+  sd_bacc = round(sd(bacc, na.rm = TRUE), 3),
+  mean_sens = round(mean(sens, na.rm = TRUE), 3),
+  sd_sens = round(sd(sens, na.rm = TRUE), 3),
+  mean_spec = round(mean(spec, na.rm = TRUE), 3),
+  sd_spec = round(sd(spec, na.rm = TRUE), 3)
+), by = learner][order(-mean_auc)]
+
+kableExtra::kable(tab, "html", caption = "Table 4") |>
+  kableExtra::kable_styling(full_width = FALSE, font_size = 10) |>
+  kableExtra::scroll_box(width = "100%", height = "400px")
+```
+
+```{r Plots Optimal}
+final <- melt(
+  res_optimal,
+  id.vars = c("learner", "seed"),
+  measure.vars = c("auc", "bacc"),
+  variable.name = "metric",
+  value.name = "value"
+)
+
+final <- final[!is.na(value)]
+final[, metric := factor(metric, levels = c("auc","bacc"), labels = c("AUC","Balanced accuracy"))]
+
+lord <- res_optimal[, AUC := median(auc, na.rm = TRUE), by = learner][order(AUC), learner]
+final[, learner := factor(learner, levels = unique(lord))]
+
+p_learner <- ggplot(final, aes(x = learner, y = value, fill = learner)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey55") +
+  geom_boxplot(width = 0.45, outlier.shape = NA, fill = "grey92", colour = "grey55") +
+  geom_jitter(aes(colour = learner), width = 0.12, height = 0, size = 2.2, alpha = 0.8, show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~ metric, scales = "free_x") +
+  scale_colour_manual(values = learner_pal) +
+  labs(
+    title = "Tuned learners on the C=O lipid region (10 seeds)",
+    subtitle = "Box = 10 seeds; dot = each seed. Dashed = chance. Ordered by median AUC.",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.y = element_blank())
+
+ggsave("plot/learners.png", p_learner, width = 12, height = 6, dpi = 300)
+p_learner
+```
+
+### 3.4 Sampling Uncertainty
+
+The preceding sections quantify how performance varies across random seeds, that is, the reproducibility of the result at fixed data. A distinct and more consequential question is how much the estimates would change if a different set of fish had been sampled — the sampling uncertainty. With only 30 fillets nested within 10 storage days, this is the dominant source of uncertainty, and we estimated it in two complementary ways for the reference models (RF and XGB) on the C=O region.
+First, we computed a DeLong 95% confidence interval on the pooled out-of-day AUC. This is an analytic interval designed for the area under the ROC curve, but it treats the 30 fillets as independent and therefore ignores the grouping by storage day; it is consequently optimistic — a lower bound on the true uncertainty. Second, we applied a day-level resampling scheme: storage days were repeatedly resampled (with replacement, then reduced to their distinct values), and the entire leave-one-day-out procedure was re-run on each resampled set, yielding a distribution of AUC values whose 2.5th and 97.5th percentiles form the interval. Because this scheme respects the day-level structure — the relevant unit of near-independence — it is the more honest of the two, and being based on subsets of the days it is, if anything, slightly conservative.
+The two methods agree closely (Table X). For Random Forest, the DeLong interval is [0.383, 0.909] and the resampling interval [0.390, 0.872], around a point estimate of ≈ 0.65; for XGBoost the intervals are [0.420, 0.925] and [0.421, 0.882], around ≈ 0.67. The close agreement between an analytic and a resampling-based method lends confidence that the width of these intervals is real and not an artefact of either approach.
+
+The interpretation is sobering but important. While the point estimates indicate a moderate signal (AUC ≈ 0.65–0.67), localised in the lipid region and stable across seeds, the sampling intervals are wide and their lower bounds fall below chance (≈ 0.38–0.42). At n = 30, the data do not permit excluding, at conventional confidence levels, that the true performance is no better than chance. This does not contradict the earlier findings: the convergence of evidence across regions, models and seeds points consistently to a genuine, chemically coherent signal. It does, however, place a firm boundary on what can be claimed from this dataset. The results are best read as preliminary and hypothesis-generating: they identify where the freshness signal resides and what kind of model captures it, while demonstrating that a definitive estimate of its strength requires a substantially larger sample.
+
+```{r Boostrap}
+if (!file.exists("data/results/bootstrap results.rds")) {
+  RESULTS <- list()
+
+  for (ln in c("RF", "XGB")) {
+    pr <- pooled_pred(ln, CO_FEATURES, day_real)
+    d <- delong_ci(pr)
+
+    # (B) day-cluster bootstrap
+    days <- unique(day_real)
+    ba <- numeric(BOOTSTRAP)
+
+    for (b in seq_len(BOOTSTRAP)) {
+      db <- sample(days, length(days), replace = TRUE)
+      ba[b] <- auc_of(pooled_pred(ln, CO_FEATURES, days = db))
+    }
+
+    ba <- ba[!is.na(ba)]; qb <- quantile(ba, c(.025, .5, .975))
+
+    RESULTS[[ln]] <- data.table(
+      learner = ln,
+      auc = round(d[2], 3),
+      delong_lo = round(d[1], 3),
+      delong_hi = round(d[3], 3),
+      boot_med = round(qb[2], 3),
+      boot_lo = round(qb[1], 3),
+      boot_hi = round(qb[3], 3),
+      boot_n = length(ba)
+    )
+  }
+
+  res_boot <- rbindlist(RESULTS)
+
+  saveRDS(res_boot, "data/results/bootstrap results.rds")
+} else {
+  res_boot <- readRDS("data/results/bootstrap results.rds")
+}
+
+print(res_boot)
+
+pl <- rbindlist(list(
+  res_boot[, .(
+    learner, kind = "DeLong (analytic)",
+    est = auc, lo = delong_lo, hi = delong_hi
+  )],
+  res_boot[, .(
+    learner, kind = "Day-cluster bootstrap",
+    est = boot_med, lo = boot_lo, hi = boot_hi
+  )]
+))
+
+lord <- res_boot[order(auc), learner]
+pl[, learner := factor(learner, levels = lord)]
+pl[, kind := factor(kind, levels = c("DeLong (analytic)", "Day-cluster bootstrap"))]
+
+dodge <- position_dodge(width = 0.55)
+method_pal <- c("DeLong (analytic)" = "#3D5A80", "Day-cluster bootstrap" = "#9B1B30")
+method_shape <- c("DeLong (analytic)" = 16, "Day-cluster bootstrap" = 17)
+
+p_bootstrap <- ggplot(pl, aes(x = est, y = learner, colour = kind, shape = kind, group = kind)) +
+  annotate("rect", xmin = -Inf, xmax = 0.5, ymin = -Inf, ymax = Inf, fill = "grey90", alpha = 0.5) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", colour = "grey45") +
+  geom_linerange(aes(xmin = lo, xmax = hi), position = dodge, linewidth = 1.3) +
+  geom_point(position = dodge, size = 3) +
+  geom_text(aes(label = sprintf("%.2f", est)), position = dodge, vjust = -1.5, size = 3, show.legend = FALSE) +
+  scale_colour_manual(values = method_pal, name = NULL) +
+  scale_shape_manual(values = method_shape, name = NULL) +
+  scale_x_continuous(limits = c(0.3, 1.0), breaks = seq(0.3, 1.0, 0.1)) +
+  labs(
+    title = "AUC uncertainty on the C=O region (default RF & XGB)",
+    subtitle = "95% intervals. DeLong is optimistic (ignores day clustering); the day-cluster\nbootstrap is the honest, wider statement. Both cross the chance line at n=30.",
+    x = "Pooled out-of-day AUC",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.y = element_blank(), legend.position = "top")
+
+ggsave("plot/bootstrap.png", p_bootstrap, width = 12, height = 6, dpi = 300)
+p_bootstrap
+```
+
+## **Overall study results**
+
+This second study set out to address the high-dimensionality problem of the original analysis by aggregating the 140 NIR wavelengths into 15 chemically interpretable features — the mean, slope and standard deviation of five bond-class regions. The aim was not necessarily to raise classification performance, but to test whether a chemically grounded dimensionality reduction would yield results consistent with, and more interpretable than, the original wavelength-by-wavelength approach. It did.
+
+The central finding is that NIR classifies fresh versus spoiled fillets at a moderate level, and does so only through non-linear models. Validated leave-one-day-out and averaged across ten seeds, tree ensembles reached AUC ≈ 0.71 (balanced accuracy ≈ 0.71) on the full 15-feature set, whereas the linear discriminant performed at or below chance. The signal that the spectra carry about freshness is therefore real but non-linear: a single linear boundary fails to separate the classes, while flexible models recover the distinction.
+This signal is chemically localised. Evaluated region by region, the two fatty-acid windows — C=O lipids (~1630–1760 nm) and C–H/C–O esters (~2130–2350 nm) — classified above chance, whereas the protein N-H and water/C-H regions fell below it; the model using all five regions jointly did not exceed the single C=O region, indicating that the discriminative information is concentrated rather than distributed. The separation between the fatty-acid block and the remaining regions was stable across seeds, even though the differences within that block were not. This localisation is consistent with lipid oxidation — a deterioration process that proceeds alongside the ATP degradation the K-value measures — rather than with the nitrogenous compounds themselves, suggesting that NIR senses freshness indirectly, through a concomitant chemical marker.
+
+Two methodological results frame these conclusions. First, hyperparameter tuning did not improve performance and, for SVM and RF, slightly degraded it; at this sample size the inner selection overfits, so default-configuration models were retained as the more robust and parsimonious choice. Second, among classifiers Random Forest proved the most reliable — competitive in accuracy and highly stable across seeds — whereas XGBoost reached comparable peaks only intermittently, its higher values reflecting favourable random splits rather than a reproducible advantage. Random Forest was therefore treated as the reference model.
+These findings must be read against the binding constraint of sample size. With 30 complete-case fillets nested in 10 storage days, the sampling uncertainty is large: the 95% intervals on AUC, estimated by both the analytic DeLong method and day-level resampling, span roughly [0.39, 0.88], and their lower bounds fall below chance. The convergence of evidence — across regions, models and seeds, and the chemical coherence of the localised signal — points consistently to a genuine effect; but the data do not permit excluding chance-level performance at conventional confidence.
+
+Taken together, the study confirms and clarifies the earlier work rather than overturning it. Dimensionality reduction by chemical region reproduces a moderate, non-linear freshness signal and pins it to the lipid regions of the spectrum, giving the result a chemical interpretation the original wavelength-level analysis lacked. This is a positive but exploratory outcome: it establishes where the freshness signal resides and what kind of model recovers it, while a definitive assessment of NIR's practical value for routine freshness screening will require substantially larger and more balanced datasets.
+
