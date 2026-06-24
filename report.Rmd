@@ -491,8 +491,6 @@ if (!file.exists("data/results/bootstrap results.rds")) {
   res_boot <- readRDS("data/results/bootstrap results.rds")
 }
 
-print(res_boot)
-
 pl <- rbindlist(list(
   res_boot[, .(
     learner, kind = "DeLong (analytic)",
