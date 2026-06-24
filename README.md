@@ -83,7 +83,7 @@ Two complementary intervals are placed on the AUC of the reference models on the
 
 The fatty-acid regions (C=O lipids, esters) rank highest; protein and water/C-H fall **below chance**. Using all five regions jointly does **not** beat the single C=O region — the discriminative information is concentrated, not distributed. Values are averaged over all seven learners (including linear models near chance), so they identify the signal-bearing region rather than maximal accuracy.
 
-![Region performance](plot/region performance.png)
+![Region performance](plot/region_performance.png)
 
 ### Per-learner performance and stability (15 features)
 
