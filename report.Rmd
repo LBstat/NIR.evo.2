@@ -36,6 +36,9 @@ learner_pal <- c(
 
 NSEED <- 10
 BOOTSTRAP <- 1000
+
+save_tables <- TRUE
+save_figures <- TRUE
 ```
 
 ## **Introduction**
@@ -244,6 +247,7 @@ if (!file.exists("data/results/overall regions results.rds")) {
   res_list[[length(res_list) + 1]] <- run_seeds(Xr_real, "all regions")
 
   saveRDS(res_region, "data/results/overall regions results.rds")
+  save_tab(res_region, "overall regions results")
 } else {
   res_region <- readRDS("data/results/overall regions results.rds")
 }
@@ -261,6 +265,7 @@ if (!file.exists("data/results/optimal regions results.rds")) {
   }))
 
   saveRDS(res_optimal, "data/results/optimal regions results.rds")
+  save_tab(res_optimal, "optimal regions results")
 } else {
   res_optimal <- readRDS("data/results/optimal regions results.rds")
 }
@@ -341,7 +346,7 @@ p_region <- ggplot(L, aes(x = featset, y = value, fill = grp)) +
   theme_minimal(base_size = 11) +
   theme(panel.grid.minor = element_blank(), legend.position = "top")
 
-ggsave("plot/region_performance.png", p_region, width = 12, height = 6, dpi = 300)
+save_fig(p_region, "region_performance.png", 12, 6)
 p_region
 ```
 
@@ -382,7 +387,7 @@ p_strip <- ggplot(D, aes(x = learner, y = value)) +
   theme_minimal(base_size = 11) +
   theme(panel.grid.minor = element_blank())
 
-ggsave("plot/seed_stability.png", p_strip, width = 12, height = 6, dpi = 300)
+save_fig(p_strip, "seed_stability.png", 12, 6)
 p_strip
 ```
 
@@ -441,7 +446,7 @@ p_learner <- ggplot(final, aes(x = learner, y = value, fill = learner)) +
   theme_minimal(base_size = 11) +
   theme(panel.grid.minor = element_blank(), panel.grid.major.y = element_blank())
 
-ggsave("plot/learners.png", p_learner, width = 12, height = 6, dpi = 300)
+save_fig(p_learner, "learners.png", 12, 6)
 p_learner
 ```
 
@@ -487,6 +492,7 @@ if (!file.exists("data/results/bootstrap results.rds")) {
   res_boot <- rbindlist(RESULTS)
 
   saveRDS(res_boot, "data/results/bootstrap results.rds")
+  save_tab(res_boot, "bootstrap results")
 } else {
   res_boot <- readRDS("data/results/bootstrap results.rds")
 }
@@ -528,7 +534,7 @@ p_bootstrap <- ggplot(pl, aes(x = est, y = learner, colour = kind, shape = kind,
   theme_minimal(base_size = 11) +
   theme(panel.grid.minor = element_blank(), panel.grid.major.y = element_blank(), legend.position = "top")
 
-ggsave("plot/bootstrap.png", p_bootstrap, width = 12, height = 6, dpi = 300)
+save_fig(p_bootstrap, "bootstrap.png", 12, 6)
 p_bootstrap
 ```
 

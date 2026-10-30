@@ -321,3 +321,10 @@ delong_ci <- function(pr) {
   as.numeric(pROC::ci.auc(r, method = "delong"))
 }
 
+save_tab <- function(df, name) {
+  if (save_tables) write.csv2(df, file.path("data/results", paste0(name, ".csv")), row.names = FALSE)
+}
+
+save_fig <- function(plot, name, w, h) {
+  if (save_figures) ggsave(file.path("plot", name), plot, width = w, height = h, dpi = 300, bg = "white")
+}
